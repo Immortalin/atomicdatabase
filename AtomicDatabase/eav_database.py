@@ -169,15 +169,25 @@ def evaluate_exprs(lst, binds):
             res.append(e)
     return res
 
+def evaluate_and_rule(db, and_clauses, binds={}, subs={}):
+    if and_clauses == []:
+        yield binds
+    else:
+        head, *tail = and_clauses
+        possible = evaluate_rule(db, head, binds, subs)
+        for p in possible:
+            yield from evaluate_and_rule(db, tail, p, subs)
+
 SPECIAL_RULES = {
     "print": lambda tail: print("\nInternal AD Log: " + str(tail[-1])),
 }
-
-
 def evaluate_rule(db, rule, binds={}, subs={}):
     global types
 
     head, *tail = rule
+    print("STACK DEPTH: " + str(len(inspect.stack())))
+    print(head, tail)
+
 
     max_args = types[head-6]["arg_count"][1]
     min_args = types[head-6]["arg_count"][0]
@@ -221,8 +231,6 @@ def evaluate_rule(db, rule, binds={}, subs={}):
                 lit_vals = [val if tpe == LITERAL or tpe == LIST else None for (tpe, val) in tail]
                 inputs = lit_vals[:1] + lit_vals[2:]
                 input_binds = { k: v for k, v in zip(rule["args"], inputs) if v != None }
-
-                print("STACK DEPTH: " + str(len(inspect.stack())))
 
                 for res in evaluate_rule(db, rule["body"], input_binds, subs=substitutions):
                     output_binds = { substitutions[key]: value
@@ -303,20 +311,7 @@ def evaluate_rule(db, rule, binds={}, subs={}):
             except StopIteration:
                 continue
     elif head == CONJ_AND:
-        possibilities = iter([copy.copy(binds)])
-        for clause in tail:
-            new_possibilities = iter(())
-            for p in possibilities:
-                new_possibilities = chain(new_possibilities, evaluate_rule(db, clause, p, subs))
-            possibilities = chain(possibilities, new_possibilities)
-        yield from possibilities
-        # if and_clauses == []:
-        #     yield binds
-        # else:
-        #     head, *tail = and_clauses
-        #     possible = evaluate_rule(db, head, binds, subs)
-        #     for p in possible:
-        #        yield from evaluate_and_rule(db, tail, p, subs)
+        yield from evaluate_and_rule(db, tail, binds, subs)
 
 def clean_symbol(e):
     if isinstance(e, Symbol):
