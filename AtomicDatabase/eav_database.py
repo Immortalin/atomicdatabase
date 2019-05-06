@@ -1,15 +1,8 @@
-import re
-import os
-import hashlib
-from collections import namedtuple
+import re, os, pprint, hashlib, copy, inspect, json
+from collections import namedtuple, defaultdict
 from utils import *
-from enum import Enum
-from itertools import chain
+from itertools import chain, islice
 from sexpdata import loads, dumps, Symbol, Bracket
-import copy
-import inspect
-import pickle
-import json
 from tco import tail_call_optimized
 from functools import wraps
 
@@ -169,149 +162,213 @@ def evaluate_exprs(lst, binds):
             res.append(e)
     return res
 
-def evaluate_and_rule(db, and_clauses, binds={}, subs={}):
+def evaluate_and_rule(db, and_clauses, binds={}, subs={}, rule_name=None):
     if and_clauses == []:
         yield binds
     else:
         head, *tail = and_clauses
-        possible = evaluate_rule(db, head, binds, subs)
+        possible = evaluate_rule(db, head, binds, subs, rule_name)
         for p in possible:
-            yield from evaluate_and_rule(db, tail, p, subs)
+            yield from evaluate_and_rule(db, tail, p, subs, rule_name)
+
+pp = pprint.PrettyPrinter(indent=4)
+
+def freshen_bindstack(bindstack):
+    return [(fresh + 1, binds) for fresh, binds in bindstack]
 
 SPECIAL_RULES = {
     "print": lambda tail: print("\nInternal AD Log: " + str(tail[-1])),
 }
-def evaluate_rule(db, rule, binds={}, subs={}):
+def evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1):
     global types
 
-    head, *tail = rule
-    print("STACK DEPTH: " + str(len(inspect.stack())))
-    print(head, tail)
+    bindstack = [(-1, start_binds)]
+    rulestack = [rule]
+    stack_state = {
+        "in_or": False,
+        "in_cond": False,
+    }
+
+    def after_yield_checks(state):
+        pass
+
+    # TODO: Make condition stop when first expression is satisfied (might not be needed)
+    # TODO: Allow offset outputs so that you can get 2nd, 3rd answer etc
+
+    generation = 0
+    while len(rulestack) > 0:
+        exec_times = 0
+        db_find_success = 0
+
+        try:
+            head, *tail = rulestack.pop()
+        except:
+            break
+
+        if head == -1:
+            generation -= tail[0] + 1
+            bindstack = [(fresh - tail[0], binds) for fresh, binds in bindstack]
+            continue
 
 
-    max_args = types[head-6]["arg_count"][1]
-    min_args = types[head-6]["arg_count"][0]
-    if len(tail) < min_args:
-        raise ValueError("Not enough elements in " + types[head-1]["name"] +\
-                         "! Expected at least "+str(min_args)+", found " + str(len(tail)) + ".")
-    elif len(tail) > max_args and max_args != -1:
-        raise ValueError("Too many elements in " + types[head-1]["name"] +\
-                         "! Expected less than "+str(max_args)+", found " + str(len(tail)) + ".")
+        max_args = types[head-6]["arg_count"][1]
+        min_args = types[head-6]["arg_count"][0]
+        if len(tail) < min_args:
+            raise ValueError("Not enough elements in " + types[head-1]["name"] +\
+                            "! Expected at least "+str(min_args)+", found " + str(len(tail)) + ".")
+        elif len(tail) > max_args and max_args != -1:
+            raise ValueError("Too many elements in " + types[head-1]["name"] +\
+                            "! Expected less than "+str(max_args)+", found " + str(len(tail)) + ".")
 
-    tail = evaluate_exprs(tail, binds)
+        print("RULE: ", "[" + str(generation) + "]", types[head-6]["name"])
+        if head == CONJ_OR:
+            bindstack = freshen_bindstack(bindstack)
+            exec_times = 1
+            rulestack.extend([[-1, len(tail)]] + list(reversed(tail)))
+            stack_state["in_or"] = True
+        elif head == CONJ_COND:
+            bindstack = freshen_bindstack(bindstack)
+            exec_times = 1
+            rulestack.extend([[-1, len(tail)]] + list(reversed(tail)))
+            stack_state["in_cond"] = True
+        elif head == CONJ_AND:
+            bindstack = freshen_bindstack(bindstack)
+            exec_times = 1
+            rulestack.extend([[-1, len(tail)]] + list(reversed(tail)))
+        else:
+            for i, (fresh, binds) in enumerate(bindstack):
+                if fresh == generation - 1:
+                    exec_times += 1
+                    tail = evaluate_exprs(tail, binds)
 
-    if head == PREDICATE:
-        was_rule = False
-        if tail[1][0] == LITERAL and not (tail[1][1] in db.entities) and (tail[1][1] in db.rules or tail[1][1] in SPECIAL_RULES):
-            name = tail[1][1]
-            was_rule = True
+                    if head == PREDICATE:
+                        if tail[1][0] == LITERAL and not (tail[1][1] in db.entities) and\
+                        (tail[1][1] in db.rules or tail[1][1] in SPECIAL_RULES):
+                            name = tail[1][1]
+                            print("CALLING: " + name)
 
-            tail = [(LITERAL, binds[name])
-                    if tpe == VARIABLE and name in binds
-                    else (tpe, name)
-                    for tpe, name in tail]
+                            tail = [(LITERAL, binds[name])
+                                    if tpe == VARIABLE and name in binds
+                                    else (tpe, name)
+                                    for tpe, name in tail]
 
-            sr = SPECIAL_RULES.get(name)
-            if sr:
-                res = sr(tail)
-                if res:
-                    yield from res
-                else:
-                    yield binds
-            else:
-                rule = db.rules[name]
-                if len(tail) - 1 != len(rule["args"]):
-                    raise ValueError("Wrong number of arguments in " + rule["name"].upper() +\
-                                     " Rule! Expected "+str(len(rule["args"]))+", found " + str(len(tail)) + ".")
+                            sr = SPECIAL_RULES.get(name)
+                            if sr:
+                                sr(tail)
+                                bindstack = freshen_bindstack(bindstack)
+                            else:
+                                if name == rule_name:
+                                    print("STACK DEPTH: " + str(len(inspect.stack())) + " [inside " + str(rule_name) + "]")
+                                    rule = db.rules[rule_name]
+                                    lit_vals = [val if tpe == LITERAL or tpe == LIST else None for (tpe, val) in tail]
+                                    inputs = lit_vals[:1] + lit_vals[2:]
+                                    input_binds = { k: v for k, v in zip(rule["args"], inputs) if v != None }
 
-                var_names = [name if tpe == VARIABLE else None for (tpe, name) in tail]
-                params = var_names[:1] + var_names[2:]
-                substitutions = dict(zip(rule["args"], params))
+                                    bindstack = [(0, input_binds)]
+                                    generation = 0
+                                    rulestack = [rule["body"]]
+                                    stack_state = {
+                                        "in_or": False,
+                                        "in_cond": False,
+                                    }
+                                else:
+                                    rule = db.rules[name]
+                                    if len(tail) - 1 != len(rule["args"]):
+                                        raise ValueError("Wrong number of arguments in " + rule["name"].upper() +\
+                                                        " Rule! Expected "+str(len(rule["args"]))+", found " + str(len(tail) - 1) + ".")
 
-                lit_vals = [val if tpe == LITERAL or tpe == LIST else None for (tpe, val) in tail]
-                inputs = lit_vals[:1] + lit_vals[2:]
-                input_binds = { k: v for k, v in zip(rule["args"], inputs) if v != None }
+                                    var_names = [name if tpe == VARIABLE else None for (tpe, name) in tail]
+                                    params = var_names[:1] + var_names[2:]
+                                    substitutions = dict(zip(rule["args"], params))
 
-                for res in evaluate_rule(db, rule["body"], input_binds, subs=substitutions):
-                    output_binds = { substitutions[key]: value
-                                     for key, value in res.items()
-                                     if key in substitutions and substitutions[key] }
-                    for key, value in binds.items():
-                        if not key in output_binds:
-                            output_binds[key] = value
+                                    lit_vals = [val if tpe == LITERAL or tpe == LIST else None for (tpe, val) in tail]
+                                    inputs = lit_vals[:1] + lit_vals[2:]
+                                    input_binds = { k: v for k, v in zip(rule["args"], inputs) if v != None }
 
-                    yield output_binds
+                                    output = evaluate_rule(db, rule["body"], input_binds, subs=substitutions, rule_name=name)
+                                    print("OUT: " + str(output))
+                                    for _, res in output:
+                                        output_binds = { substitutions[key]: value
+                                                        for key, value in res.items()
+                                                        if key in substitutions and substitutions[key] }
+                                        for key, value in binds.items():
+                                            if not key in output_binds:
+                                                output_binds[key] = value
 
-        if not was_rule:
-            if len(tail) < 3:
-                raise ValueError("Not enough elements in PREDICATE" + \
-                                 "! Expected at least 3, found " + str(len(tail)) + ".")
-            if tail[0][0] == LITERAL and tail[1][0] == LITERAL and tail[2][0] == LITERAL:
-                res = db.get_value(tail[0][1], tail[1][1])
-                if res and res == tail[2][1]:
-                    yield binds
-                elif not res:
-                    db.add((tail[0][1], tail[1][1], tail[2][1]))
-                    yield binds
-            else:
-                for (e, a, v) in db.eavs.values():
-                    eav_rule = [(LITERAL, db.entities[e]),
-                                (LITERAL, db.attributes[a]),
-                                ast_value_wrap(v, False)]
-                    res = unify(tail, eav_rule, copy.copy(binds), db.global_binds)
-                    if res != None:
-                        yield res
-    elif head == CONJ_COMP:
-        op, *args = tail
-        vals = []
-        for e in args:
-            if e[0] == VARIABLE:
-                val = get_binds(e[1], binds, db.global_binds)
-                if val != None:
-                    vals.append(val)
-                else:
-                    raise ValueError("Undefined variable " + e[1] + "!")
-            else:
-                vals.append(e[1])
-        failed = False
-        last = None
-        for v in vals:
-            choice = False
-            if last != None:
-                if op == "<":
-                    choice = v > last
-                elif op == ">":
-                    choice = v < last
-                elif op == ">=":
-                    choice = v <= last
-                elif op == "<=":
-                    choice = v >= last
-            if choice or last is None:
-                last = v
-            else:
-                failed = True
-                break
-        if not failed:
-            yield binds
-    elif head == UNIFY:
-        new_binds = copy.copy(binds)
-        res = unify([tail[0]], [tail[1]], new_binds, db.global_binds)
-        if res != None:
-            yield res
-    elif head == CONJ_OR:
-        for tail_x in tail:
-            yield from evaluate_rule(db, tail_x, copy.copy(binds), subs)
-    elif head == CONJ_COND:
-        for branch in tail:
-            ret = evaluate_rule(db, branch, copy.copy(binds), subs)
-            try:
-                fst = next(ret)
-                yield from chain([fst], ret)
-                break
-            except StopIteration:
-                continue
-    elif head == CONJ_AND:
-        yield from evaluate_and_rule(db, tail, binds, subs)
+                                        print("RETURNED: " + str(output_binds))
+                                        bindstack.append((generation, output_binds))
+                                        after_yield_checks(stack_state)
+                        else:
+                            if len(tail) < 3:
+                                raise ValueError("Not enough elements in PREDICATE" + \
+                                                "! Expected at least 3, found " + str(len(tail)) + ".")
+                            if tail[0][0] == LITERAL and tail[1][0] == LITERAL and tail[2][0] == LITERAL:
+                                res = db.get_value(tail[0][1], tail[1][1])
+                                if res and res == tail[2][1]:
+                                    bindstack.append((generation, binds))
+                                    after_yield_checks(stack_state)
+                                elif not res:
+                                    db.add((tail[0][1], tail[1][1], tail[2][1]))
+                                    bindstack.append((generation, binds))
+                                    after_yield_checks(stack_state)
+                            else:
+                                for i, (e, a, v) in enumerate(islice(db.eavs.values(), db_find_success+exec_times, None)):
+                                    eav_rule = [(LITERAL, db.entities[e]),
+                                                (LITERAL, db.attributes[a]),
+                                                ast_value_wrap(v, False)]
+                                    res = unify(tail, eav_rule, copy.copy(binds), db.global_binds)
+                                    if res != None:
+                                        db_find_success = i
+                                        bindstack.append((generation, res))
+                                        after_yield_checks(stack_state)
+                    elif head == CONJ_COMP:
+                        op, *args = tail
+                        vals = []
+                        for e in args:
+                            if e[0] == VARIABLE:
+                                val = get_binds(e[1], binds, db.global_binds)
+                                if val != None:
+                                    vals.append(val)
+                                else:
+                                    raise ValueError("Undefined variable " + e[1] + "!")
+                            else:
+                                vals.append(e[1])
+                        failed = False
+                        last = None
+                        for v in vals:
+                            choice = False
+                            if last != None:
+                                if op == "<":
+                                    choice = v > last
+                                elif op == ">":
+                                    choice = v < last
+                                elif op == ">=":
+                                    choice = v <= last
+                                elif op == "<=":
+                                    choice = v >= last
+                            if choice or last is None:
+                                last = v
+                            else:
+                                failed = True
+                                break
+                        if not failed:
+                            bindstack[i] = (generation, binds)
+                            after_yield_checks(stack_state)
+                    elif head == UNIFY:
+                        new_binds = copy.copy(binds)
+                        res = unify([tail[0]], [tail[1]], new_binds, db.global_binds)
+                        if res != None:
+                            bindstack[i] = (generation, res)
+                            after_yield_checks(stack_state)
+
+        pp.pprint(bindstack)
+        pp.pprint(rulestack)
+        if exec_times > 0:
+            generation += 1
+
+    print("----- RETURN ------")
+    pp.pprint(bindstack)
+    return bindstack
 
 def clean_symbol(e):
     if isinstance(e, Symbol):
