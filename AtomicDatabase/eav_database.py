@@ -168,7 +168,7 @@ def evaluate_and_rule(db, and_clauses, binds={}, subs={}, rule_name=None):
         yield binds
     else:
         head, *tail = and_clauses
-        possible = evaluate_rule(db, head, binds, subs, rule_name)
+        possible = runtime_evaluate_rule(db, head, binds, subs, rule_name)
         for p in possible:
             yield from evaluate_and_rule(db, tail, p, subs, rule_name)
 
@@ -177,10 +177,18 @@ pp = pprint.PrettyPrinter(indent=4)
 def freshen_bindstack(bindstack):
     return [(fresh + 1, binds) for fresh, binds in bindstack]
 
+def evaluate_rule(db, rule, start_binds={}, solution_index=0, solutions=1):
+    result = runtime_evaluate_rule(db, rule, start_binds, solution_index=solution_index, solutions=solutions)
+    groups = defaultdict(list)
+    for gen, bind in result:
+        groups[gen].append(bind)
+
+    return groups[list(groups.keys())[-1]]
+
 SPECIAL_RULES = {
     "print": lambda tail: print("\nInternal AD Log: " + str(tail[-1])),
 }
-def evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1):
+def runtime_evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1, solution_index=0):
     global types
 
     conjstack = []
@@ -280,9 +288,8 @@ def evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1
                                     inputs = lit_vals[:1] + lit_vals[2:]
                                     input_binds = { k: v for k, v in zip(rule["args"], inputs) if v != None }
 
-                                    output = evaluate_rule(db, rule["body"], input_binds, subs=substitutions, rule_name=name)
-                                    print("OUT: " + str(output))
-                                    for _, res in output:
+                                    output = runtime_evaluate_rule(db, rule["body"], input_binds, subs=substitutions, rule_name=name)
+                                    for fresh, res in output:
                                         output_binds = { substitutions[key]: value
                                                         for key, value in res.items()
                                                         if key in substitutions and substitutions[key] }
@@ -290,13 +297,15 @@ def evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1
                                             if not key in output_binds:
                                                 output_binds[key] = value
 
-                                        print("RETURNED: " + str(output_binds))
-                                        bindstack.append((generation, output_binds))
+                                        if output_binds != {} and output_binds != None:
+                                            print(output_binds.keys(), substitutions)
+                                            if set(output_binds.keys()).issuperset(set(filter(lambda x: x, substitutions.values()))):
+                                                bindstack.append((generation, output_binds))
                         else:
                             if len(tail) < 3:
                                 raise ValueError("Not enough elements in PREDICATE" + \
                                                 "! Expected at least 3, found " + str(len(tail)) + ".")
-                            if tail[0][0] == LITERAL and tail[1][0] == LITERAL and tail[2][0] == LITERAL:
+                            if tail[0][0] == LITERAL and tail[1][0] == LITERAL and tail[2][0] in [LITERAL, LIST]:
                                 res = db.get_value(tail[0][1], tail[1][1])
                                 if res and res == tail[2][1]:
                                     bindstack.append((generation, binds))
