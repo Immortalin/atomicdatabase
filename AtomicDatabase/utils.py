@@ -56,7 +56,6 @@ def is_variable(e):
 
 def is_destructuring_pattern(pat):
     pat = [x[1] for x in pat]
-    print(pat)
     return "..." in pat or "@" in pat
 
 def destructure(pattern, value):

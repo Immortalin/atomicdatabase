@@ -1,4 +1,5 @@
 import re, os, pprint, hashlib, copy, inspect, json
+from more_itertools import intersperse
 from collections import namedtuple, defaultdict
 from utils import *
 from itertools import chain, islice
@@ -182,20 +183,14 @@ SPECIAL_RULES = {
 def evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1):
     global types
 
+    conjstack = []
     bindstack = [(-1, start_binds)]
     rulestack = [rule]
-    stack_state = {
-        "in_or": False,
-        "in_cond": False,
-    }
-
-    def after_yield_checks(state):
-        pass
+    generation = 0
 
     # TODO: Make condition stop when first expression is satisfied (might not be needed)
     # TODO: Allow offset outputs so that you can get 2nd, 3rd answer etc
 
-    generation = 0
     while len(rulestack) > 0:
         exec_times = 0
         db_find_success = 0
@@ -206,8 +201,10 @@ def evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1
             break
 
         if head == -1:
-            generation -= tail[0] + 1
+            generation -= tail[0] + int(tail[1] == 0)
             bindstack = [(fresh - tail[0], binds) for fresh, binds in bindstack]
+            if tail[1]:
+                conjstack.pop()
             continue
 
 
@@ -223,18 +220,19 @@ def evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1
         print("RULE: ", "[" + str(generation) + "]", types[head-6]["name"])
         if head == CONJ_OR:
             bindstack = freshen_bindstack(bindstack)
+            conjstack.append(CONJ_OR)
             exec_times = 1
-            rulestack.extend([[-1, len(tail)]] + list(reversed(tail)))
-            stack_state["in_or"] = True
+            rulestack.extend([[-1, 0, True]] + list(intersperse([-1, 1, False], reversed(tail))))
         elif head == CONJ_COND:
             bindstack = freshen_bindstack(bindstack)
             exec_times = 1
-            rulestack.extend([[-1, len(tail)]] + list(reversed(tail)))
-            stack_state["in_cond"] = True
+            conjstack.append(CONJ_COND)
+            rulestack.extend([[-1, 0, True]] + list(intersperse([-1, 1, False], reversed(tail))))
         elif head == CONJ_AND:
             bindstack = freshen_bindstack(bindstack)
             exec_times = 1
-            rulestack.extend([[-1, len(tail)]] + list(reversed(tail)))
+            conjstack.append(CONJ_AND)
+            rulestack.extend([[-1, len(tail), True]] + list(reversed(tail)))
         else:
             for i, (fresh, binds) in enumerate(bindstack):
                 if fresh == generation - 1:
@@ -267,10 +265,7 @@ def evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1
                                     bindstack = [(0, input_binds)]
                                     generation = 0
                                     rulestack = [rule["body"]]
-                                    stack_state = {
-                                        "in_or": False,
-                                        "in_cond": False,
-                                    }
+                                    conjstack = []
                                 else:
                                     rule = db.rules[name]
                                     if len(tail) - 1 != len(rule["args"]):
@@ -297,7 +292,6 @@ def evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1
 
                                         print("RETURNED: " + str(output_binds))
                                         bindstack.append((generation, output_binds))
-                                        after_yield_checks(stack_state)
                         else:
                             if len(tail) < 3:
                                 raise ValueError("Not enough elements in PREDICATE" + \
@@ -306,11 +300,9 @@ def evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1
                                 res = db.get_value(tail[0][1], tail[1][1])
                                 if res and res == tail[2][1]:
                                     bindstack.append((generation, binds))
-                                    after_yield_checks(stack_state)
                                 elif not res:
                                     db.add((tail[0][1], tail[1][1], tail[2][1]))
                                     bindstack.append((generation, binds))
-                                    after_yield_checks(stack_state)
                             else:
                                 for i, (e, a, v) in enumerate(islice(db.eavs.values(), db_find_success+exec_times, None)):
                                     eav_rule = [(LITERAL, db.entities[e]),
@@ -320,7 +312,6 @@ def evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1
                                     if res != None:
                                         db_find_success = i
                                         bindstack.append((generation, res))
-                                        after_yield_checks(stack_state)
                     elif head == CONJ_COMP:
                         op, *args = tail
                         vals = []
@@ -353,14 +344,13 @@ def evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, solutions=1
                                 break
                         if not failed:
                             bindstack[i] = (generation, binds)
-                            after_yield_checks(stack_state)
                     elif head == UNIFY:
-                        new_binds = copy.copy(binds)
-                        res = unify([tail[0]], [tail[1]], new_binds, db.global_binds)
+                        res = unify([tail[0]], [tail[1]], copy.copy(binds), db.global_binds)
                         if res != None:
+                            bindstack = freshen_bindstack(bindstack)
                             bindstack[i] = (generation, res)
-                            after_yield_checks(stack_state)
 
+        print("STACK: " + str(conjstack))
         pp.pprint(bindstack)
         pp.pprint(rulestack)
         if exec_times > 0:
