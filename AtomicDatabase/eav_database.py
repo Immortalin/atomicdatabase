@@ -201,7 +201,7 @@ def runtime_evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, sol
 
     while len(rulestack) > 0:
         exec_times = 0
-        db_find_success = 0
+        db_find_success = []
 
         try:
             head, *tail = rulestack.pop()
@@ -242,8 +242,10 @@ def runtime_evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, sol
             conjstack.append(CONJ_AND)
             rulestack.extend([[-1, len(tail), True]] + list(reversed(tail)))
         else:
+            bindcount = 0
             for i, (fresh, binds) in enumerate(bindstack):
                 if fresh == generation - 1:
+                    bindcount += 1
                     exec_times += 1
                     tail = evaluate_exprs(tail, binds)
 
@@ -288,7 +290,8 @@ def runtime_evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, sol
                                     inputs = lit_vals[:1] + lit_vals[2:]
                                     input_binds = { k: v for k, v in zip(rule["args"], inputs) if v != None }
 
-                                    output = runtime_evaluate_rule(db, rule["body"], input_binds, subs=substitutions, rule_name=name)
+                                    output = runtime_evaluate_rule(db, rule["body"], input_binds, subs=substitutions, rule_name=name,
+                                                                   solutions=solutions, solution_index=solution_index)
                                     for fresh, res in output:
                                         output_binds = { substitutions[key]: value
                                                         for key, value in res.items()
@@ -298,7 +301,6 @@ def runtime_evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, sol
                                                 output_binds[key] = value
 
                                         if output_binds != {} and output_binds != None:
-                                            print(output_binds.keys(), substitutions)
                                             if set(output_binds.keys()).issuperset(set(filter(lambda x: x, substitutions.values()))):
                                                 bindstack.append((generation, output_binds))
                         else:
@@ -313,14 +315,21 @@ def runtime_evaluate_rule(db, rule, start_binds={}, subs={}, rule_name=None, sol
                                     db.add((tail[0][1], tail[1][1], tail[2][1]))
                                     bindstack.append((generation, binds))
                             else:
-                                for i, (e, a, v) in enumerate(islice(db.eavs.values(), db_find_success+exec_times, None)):
+                                start_pos = db_find_success[-1] + 1 if len(db_find_success) > 0 else 0
+                                for i, (e, a, v) in enumerate(islice(db.eavs.values(), start_pos, None)):
+                                    if len(db_find_success) - solution_index >= solutions:
+                                        print("TOO MANY RESULTS: ", db_find_success, solutions, solution_index)
+                                        break
+
                                     eav_rule = [(LITERAL, db.entities[e]),
                                                 (LITERAL, db.attributes[a]),
                                                 ast_value_wrap(v, False)]
                                     res = unify(tail, eav_rule, copy.copy(binds), db.global_binds)
+
                                     if res != None:
-                                        db_find_success = i
-                                        bindstack.append((generation, res))
+                                        if len(db_find_success) >= solution_index:
+                                            bindstack.append((generation, res))
+                                        db_find_success.append(i)
                     elif head == CONJ_COMP:
                         op, *args = tail
                         vals = []
